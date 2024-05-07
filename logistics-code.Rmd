@@ -1,0 +1,417 @@
+---
+title: "Logistics code"
+author: "NBD"
+date: "2024-02-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+加载包
+```{r}
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(writexl)
+library(openxlsx)
+library(meta)
+library(forestplot)
+library(magrittr)
+library(checkmate)
+```
+
+```{r}
+data<-抗原总体
+data<-核酸总体V1
+data<-rbind(抗原总体,核酸总体V1)
+```
+
+清洗：去除档案0，改男性女性，改疾病状态
+```{r}
+
+data <- data %>%
+  filter(档案 != 0)
+data$性别 <- ifelse(data$性别 == '男', 'male', 'female')
+data<-data[,c(1,3,5,7,8,9,10,11,12,13,14,15,22)]
+data$总阳性 <- ifelse(data$检测结果 == '阴性', 0, 1)
+data$甲流 <- ifelse(data$检测结果 == '阴性', 0,
+                        ifelse(data$检测结果 == '甲流阳性'|data$检测结果 == '甲流乙流', 1,NA))
+data$乙流 <- ifelse(data$检测结果 == '阴性', 0,
+                        ifelse(data$检测结果 == '乙流阳性'|data$检测结果 == '甲流乙流', 1,NA))
+data$检测方法<-ifelse(data$检测方法 == '核酸', 2, 1)
+```
+
+改疫苗状态：三种接种状态
+```{r}
+data <- data %>%
+  mutate(
+    整体接种情况 = ifelse(!is.na(鼻喷2023) | !is.na(三价2023) | !is.na(四价2023), "23接种过疫苗", "未接种疫苗")
+  ) 
+data$鼻喷接种情况 <- 
+  ifelse(!is.na(data$鼻喷2023), "23接种过疫苗","未接种疫苗")
+
+data$三价接种情况 <- 
+   ifelse(!is.na(data$三价2023), "23接种过疫苗","未接种疫苗")
+
+data$四价接种情况 <- 
+  ifelse(!is.na(data$四价2023), "23接种过疫苗","未接种疫苗")
+
+#某种疫苗没打不等于没打其他疫苗
+data$鼻喷接种情况 <- 
+  ifelse(data$三价接种情况 == "23接种过疫苗"&data$鼻喷接种情况 == "未接种疫苗", NA,data$鼻喷接种情况)
+data$三价接种情况 <- 
+  ifelse(data$鼻喷接种情况 == "23接种过疫苗"&data$三价接种情况 == "未接种疫苗", NA,data$三价接种情况)
+data$四价接种情况 <- 
+  ifelse(data$三价接种情况 == "23接种过疫苗"&data$四价接种情况 == "未接种疫苗", NA,data$四价接种情况)
+data$鼻喷接种情况 <- 
+  ifelse(data$四价接种情况 == "23接种过疫苗"&data$鼻喷接种情况 == "未接种疫苗", NA,data$鼻喷接种情况)
+data$三价接种情况 <- 
+  ifelse(data$四价接种情况 == "23接种过疫苗"&data$三价接种情况 == "未接种疫苗", NA,data$三价接种情况)
+data$四价接种情况 <- 
+  ifelse(data$鼻喷接种情况 == "23接种过疫苗"&data$四价接种情况 == "未接种疫苗", NA,data$四价接种情况)
+data<-data[,-c(7:12)]
+# 计算最小日期
+min_date <- min(data$检测时间)
+
+# 计算每个日期与最小日期之间的月份差
+data$检测天数 <- interval(min_date, data$检测时间) / months(1) + 1
+
+# 将结果转换为整数
+data$检测天数 <- floor(data$检测天数)
+```
+
+改格式为logistics回归做准备
+```{r}
+data<-data[,c(8:10,2,3,7,15,11:14)]
+data[, c(1:3,5:6,7:11)] <- lapply(data[, c(1:3,5:6,7:11)], factor)
+data$整体接种情况 <- relevel(data$整体接种情况, ref = "未接种疫苗")
+data$鼻喷接种情况 <- relevel(data$鼻喷接种情况, ref = "未接种疫苗")
+data$三价接种情况 <- relevel(data$三价接种情况, ref = "未接种疫苗")
+data$四价接种情况 <- relevel(data$四价接种情况, ref = "未接种疫苗")
+```
+
+总接种logistics
+```{r}
+result<-data.frame()
+log.data<-data[,c(2,4:11)]
+log.data<-log.data[,c(1:4,8)]
+for (i in 1:3){
+  log.data1<-data[,c(i,4:11)]
+  for (j in 6:9){
+  log.data<-log.data1[,c(1:5,j)]
+  
+  formula.Outcome<-as.formula(paste(names(log.data)[1],"~",paste(names(log.data[2:ncol(log.data)]),collapse="+")))
+  log.Outcome<-glm(formula.Outcome,data=log.data,family=binomial("logit"))
+  results<-data.frame(OR=coef(log.Outcome)[10],lOR=confint.default(log.Outcome)[10,1],uOR=confint.default(log.Outcome)[10,2])
+  results<-exp(results)
+  results$OR<-1-results$OR
+  results$lOR<-1-results$lOR
+  results$uOR<-1-results$uOR
+  
+  results$CI<-apply(results,1,function(x) {paste(round(x[1],2)," (",round(x[3],2),"-",round(x[2],2),")",sep="")})
+  results$Name<-names(coef(log.Outcome)[10])
+  results<-rbind(data.frame(OR=1,lOR=1,uOR=1,CI="",Name="Junior High or Less"),results)
+  results$positive<-names(log.data)[1]
+  
+  log.data <- log.data[complete.cases(log.data), ]
+  p<-table(log.data[, names(log.data)[6]][log.data[, names(log.data)[1]] != 0])/table(log.data[,names(log.data)[6]])
+  q<-table(log.data[, names(log.data)[6]][log.data[, names(log.data)[1]] != 0])
+  n<-table(log.data[,names(log.data)[6]])
+  
+  log.n<-apply(cbind(q,n,p),1,function(x) paste(x[1],"/",x[2],"(",round(x[3]*100,2),")",sep=""))
+  
+  log.Outcome<-cbind(log.n,results) 
+  
+  q1<-c()
+  n1<-c()
+  p1<-c()
+  q1[1]<-1
+  n1[1]<-1
+  p1[1]<-1
+  q1[2]<-q[1]+q[2]
+  n1[2]<-n[1]+n[2]
+  p1[2]<-q1[2]/n1[2]
+  
+  log.n1<-apply(cbind(q1,n1,p1),1,function(x) paste(x[1],"/",x[2],"(",round(x[3]*100,2),")",sep=""))
+  log.Outcome<-cbind(log.n1,log.Outcome) 
+  
+  
+  
+  rownames(log.Outcome)<-1:nrow(log.Outcome)
+  
+  
+  result<-rbind(result,log.Outcome)
+  }
+}
+```
+
+读出
+```{r}
+
+write_xlsx(result,"E:/result.xlsx")
+
+```
+
+分年龄
+```{r}
+data1 <- data[which(data$年龄< 3),]
+data1 <- data[which(data$年龄 >= 3 & data$年龄 < 10),]
+data1 <- data[which(data$年龄 >= 10 & data$年龄 < 18),]
+data1 <- data[which(data$年龄 >= 18 & data$年龄 < 60),]
+data1 <- data[which(data$年龄 >= 60 & data$年龄 < 70),]
+data1 <- data[which(data$年龄 >= 70),]
+```
+logistic回归：分年龄
+```{r}
+result<-data.frame()
+log.data<-data1[,c(3,4:11)]
+log.data<-log.data[,c(1,3,4,5,6)]
+for (i in 1:3){
+  log.data1<-data1[,c(i,4:11)]
+  for (j in c(6)){#此处设置要不要鼻喷,加5还是不加5;核酸0-14岁三价完全缺失，不加6
+  log.data<-log.data1[,c(1,3,4,5,j)]#不要2是不要年龄
+  
+  formula.Outcome<-as.formula(paste(names(log.data)[1],"~",paste(names(log.data[2:ncol(log.data)]),collapse="+")))
+  log.Outcome<-glm(formula.Outcome,data=log.data,family=binomial("logit"))
+
+    
+    # 提取系数
+    results <- data.frame(OR = coef(log.Outcome)[9],
+                          lOR = confint.default(log.Outcome)[9,1],
+                          uOR = confint.default(log.Outcome)[9,2])
+  results<-exp(results)
+  results$OR<-1-results$OR
+  results$lOR<-1-results$lOR
+  results$uOR<-1-results$uOR
+  
+  results$CI<-apply(results,1,function(x) {paste(round(x[1],2)," (",round(x[3],2),"-",round(x[2],2),")",sep="")})
+  results$Name <- names(coef(log.Outcome))[9]
+  results<-rbind(data.frame(OR=1,lOR=1,uOR=1,CI="",Name="Junior High or Less"),results)
+  results$positive<-names(log.data)[1]
+  
+  log.data <- log.data[complete.cases(log.data), ]
+  p<-table(log.data[, names(log.data)[5]][log.data[, names(log.data)[1]] != 0])/table(log.data[,names(log.data)[5]])
+  q<-table(log.data[, names(log.data)[5]][log.data[, names(log.data)[1]] != 0])
+  n<-table(log.data[,names(log.data)[5]])
+  
+  log.n <- apply(cbind(q, n, p), 1, function(x) {
+  if (x[1] == 0 && x[2] == 0) {
+    return("NA")
+  } else {
+    return(paste(x[1], "/", x[2], "(", round(x[3] * 100, 2), ")", sep = ""))
+  }
+})
+  log.n[log.n == "NA"] <- NA
+  log.n <- log.n[!is.na(log.n)]
+  log.Outcome <- cbind(log.n, results) 
+  
+   q1<-c()
+  n1<-c()
+  p1<-c()
+  q1[1]<-1
+  n1[1]<-1
+  p1[1]<-1
+  q1[2]<-q[1]+q[2]
+  n1[2]<-n[1]+n[2]
+  p1[2]<-q1[2]/n1[2]
+  
+  log.n1<-apply(cbind(q1,n1,p1),1,function(x) paste(x[1],"/",x[2],"(",round(x[3]*100,2),")",sep=""))
+  log.Outcome<-cbind(log.n1,log.Outcome) 
+  
+  
+  
+rownames(log.Outcome) <- 1:nrow(log.Outcome)
+  
+  
+  result<-rbind(result,log.Outcome)
+  }
+}
+```
+
+三个接种季节的疫苗状态
+改疫苗状态：三种接种状态
+```{r}
+data <- data %>%
+  mutate(
+    vaccine_status_1 = ifelse(!is.na(鼻喷1) | !is.na(三价1) | !is.na(四价1), "22接种过疫苗", "22未接种疫苗"),
+    vaccine_status_2 = ifelse(!is.na(鼻喷2) | !is.na(三价2) | !is.na(四价2), "23接种过疫苗", "23未接种疫苗")
+  ) %>%
+  mutate(
+    整体接种情况 = ifelse(
+      vaccine_status_1 == "22接种过疫苗" & vaccine_status_2 == "23接种过疫苗", "22和23均接种过疫苗",
+      ifelse(
+        vaccine_status_1 == "22接种过疫苗" & vaccine_status_2 == "23未接种疫苗", "仅22年接种过疫苗",
+        ifelse(
+          vaccine_status_2 == "23接种过疫苗" & vaccine_status_1 == "22未接种疫苗", "仅23年接种过疫苗", "未接种疫苗"
+        )
+      )
+    )
+  ) %>%select(-c(vaccine_status_1, vaccine_status_2))
+data$鼻喷接种情况 <- 
+  ifelse(
+    data$整体接种情况 == "仅22年接种过疫苗" & !is.na(data$鼻喷1), "仅22年接种过疫苗",
+    ifelse(
+      data$整体接种情况 == "仅23年接种过疫苗" & !is.na(data$鼻喷2), "仅23年接种过疫苗",
+      ifelse(
+        data$整体接种情况 == "22和23均接种过疫苗" & !is.na(data$鼻喷2) & !is.na(data$鼻喷1), "22和23均接种过疫苗", "未接种疫苗"
+      )
+    )
+  )
+
+
+data$三价接种情况 <- 
+  ifelse(
+    data$整体接种情况 == "仅22年接种过疫苗" & !is.na(data$三价1), "仅22年接种过疫苗",
+    ifelse(
+      data$整体接种情况 == "仅23年接种过疫苗" & !is.na(data$三价2), "仅23年接种过疫苗",
+      ifelse(
+        data$整体接种情况 == "22和23均接种过疫苗" & !is.na(data$三价2) & !is.na(data$三价1), "22和23均接种过疫苗", "未接种疫苗"
+      )
+    )
+  )
+
+data$四价接种情况 <- 
+  ifelse(
+    data$整体接种情况 == "仅22年接种过疫苗" & !is.na(data$四价1), "仅22年接种过疫苗",
+    ifelse(
+      data$整体接种情况 == "仅23年接种过疫苗" & !is.na(data$四价2), "仅23年接种过疫苗",
+      ifelse(
+        data$整体接种情况 == "22和23均接种过疫苗" & !is.na(data$四价2) & !is.na(data$四价1), "22和23均接种过疫苗", "未接种疫苗"
+      )
+    )
+  )
+
+data<-data[,-c(7:12)]
+data$鼻喷接种情况 <- 
+  ifelse(data$整体接种情况 != "未接种疫苗" & data$鼻喷接种情况 == "未接种疫苗", NA,data$鼻喷接种情况)
+data$三价接种情况 <- 
+  ifelse(data$整体接种情况 != "未接种疫苗" & data$三价接种情况 == "未接种疫苗", NA,data$三价接种情况)
+data$四价接种情况 <- 
+  ifelse(data$整体接种情况 != "未接种疫苗" & data$四价接种情况 == "未接种疫苗", NA,data$四价接种情况)
+# 计算最小日期
+min_date <- min(data$检测时间)
+
+# 计算每个日期与最小日期之间的月份差
+data$检测天数 <- interval(min_date, data$检测时间) / months(1) + 1
+
+# 将结果转换为整数
+data$检测天数 <- floor(data$检测天数)
+```
+
+logistic回归：不区分年龄和性别
+```{r}
+result<-data.frame()
+log.data<-data[,c(1,4:11)]
+log.data<-log.data[,c(1:5,6)]
+for (i in 1:3){
+  log.data1<-data[,c(i,4:11)]
+  for (j in 6){
+  log.data<-log.data1[,c(1:5,j)]
+  
+  formula.Outcome<-as.formula(paste(names(log.data)[1],"~",paste(names(log.data[2:ncol(log.data)]),collapse="+")))
+  log.Outcome<-glm(formula.Outcome,data=log.data,family=binomial("logit"))
+  results<-data.frame(OR=coef(log.Outcome)[10:12],lOR=confint.default(log.Outcome)[10:12,1],uOR=confint.default(log.Outcome)[10:12,2])
+  results<-exp(results)
+  results$OR<-1-results$OR
+  results$lOR<-1-results$lOR
+  results$uOR<-1-results$uOR
+  
+  results$CI<-apply(results,1,function(x) {paste(round(x[1],2)," (",round(x[3],2),"-",round(x[2],2),")",sep="")})
+  results$Name<-names(coef(log.Outcome)[10:12])
+  results<-rbind(data.frame(OR=1,lOR=1,uOR=1,CI="",Name="Junior High or Less"),results)
+  results$positive<-names(log.data)[1]
+  
+  log.data <- log.data[complete.cases(log.data), ]
+  p<-table(log.data[, names(log.data)[6]][log.data[, names(log.data)[1]] != 0])/table(log.data[,names(log.data)[6]])
+  q<-table(log.data[, names(log.data)[6]][log.data[, names(log.data)[1]] != 0])
+  n<-table(log.data[,names(log.data)[6]])
+  
+  log.n<-apply(cbind(q,n,p),1,function(x) paste(x[1],"/",x[2],"(",round(x[3]*100,2),")",sep=""))
+  
+  log.Outcome<-cbind(log.n,results) 
+  
+  q1<-c()
+  n1<-c()
+  p1<-c()
+  q1[1]<-1
+  n1[1]<-1
+  p1[1]<-1
+  q1[2]<-q[1]+q[2]
+  n1[2]<-n[1]+n[2]
+  p1[2]<-q1[2]/n1[2]
+  q1[3]<-q[1]+q[3]
+  n1[3]<-n[1]+n[3]
+  p1[3]<-q1[3]/n1[3]
+  q1[4]<-q[1]+q[4]
+  n1[4]<-n[1]+n[4]
+  p1[4]<-q1[4]/n1[4]
+  
+  log.n1<-apply(cbind(q1,n1,p1),1,function(x) paste(x[1],"/",x[2],"(",round(x[3]*100,2),")",sep=""))
+  log.Outcome<-cbind(log.n1,log.Outcome) 
+  
+  
+  
+  rownames(log.Outcome)<-1:nrow(log.Outcome)
+  
+  
+  result<-rbind(result,log.Outcome)
+  }
+}
+```
+森林图
+```{r}
+library(grid)
+library(forestploter)
+data<-森林图1
+data$Subgroup <- ifelse(is.na(data$`VE (95%CI)`), 
+                      data$Subgroup,
+                      paste0("   ", data$Subgroup))#######如果变量没有缺失，就缩进一格，也就是前进一格
+
+#设置正确显示森林图中文字内容
+
+#创建用来放森林图的位置
+data$` ` <- paste(rep(" ", 20), collapse = " ")
+
+data$`Total No.(%)`  <- ifelse(is.na(data$`Total No.(%)`),
+                               " ",
+                               data$`Total No.(%)`)
+
+data$`VE (95% CI)`  <- ifelse(is.na(data$`VE (95%CI)`),
+                              " ",
+                              data$`VE (95%CI)`)
+data$LVE1<-as.numeric(data$LVE1)
+#绘制森林图
+fp_groups<-forest(data[,c(1,2,7,8)],
+                  est = data$VE1 #这里需要注意的是，est\lower\upper三组里面的值需要一一对应
+                             ,
+                  lower = data$LVE1
+                            ,
+                  upper = data$UVE1
+                            ,
+                  ci_column = c(3),
+                  ref_line = 0,
+                  xlim = c(-0.5,1.3),
+                  ticks_at = c(-0.5,0,0.5,1))
+
+fp_groups <- insert_text(fp_groups,
+                         text = "No.of Case Patients/",
+                         col = 2,
+                         part = "header",
+                         gp = gpar(fontface = "bold"))
+
+fpp <- edit_plot(fp_groups,
+                 row = c(2,6,13),
+                 gp = gpar(fontface = "bold"))#图1
+fpp <- edit_plot(fp_groups,
+                 row = c(1,5),
+                 gp = gpar(fontface = "bold"))#图2
+fpp <- edit_plot(fp_groups,
+                 row = c(1,6,11),
+                 gp = gpar(fontface = "bold"))#图3
+fpp
+
+```
+
